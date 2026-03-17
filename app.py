@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -9,28 +10,26 @@ import streamlit as st
 
 st.set_page_config(page_title="My AI Chat", layout="wide")
 
-MODEL_ID = "google/flan-t5-small"
-API_URL = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
+MODEL_ID = "meta-llama/Llama-3.2-1B-Instruct"
+API_URL = "https://router.huggingface.co/v1/chat/completions"
 CHATS_DIR = Path("chats")
 MEMORY_PATH = Path("memory.json")
 
 
 def load_hf_token() -> str | None:
-    """Return the Hugging Face token from Streamlit secrets if available."""
+    """Return the Hugging Face token from Streamlit secrets or the environment."""
+    token = None
+
     try:
         token = st.secrets["HF_TOKEN"]
     except Exception:
-        st.error(
-            "Missing Hugging Face token. Add HF_TOKEN to .streamlit/secrets.toml "
-            "or your Streamlit deployment secrets."
-        )
-        return None
+        token = os.getenv("HF_TOKEN")
 
-    token = str(token).strip()
+    token = str(token or "").strip()
     if not token:
         st.error(
-            "The Hugging Face token is empty. Update HF_TOKEN in your secrets file "
-            "before running the app."
+            "Missing Hugging Face token. Add HF_TOKEN to .streamlit/secrets.toml, "
+            "set the HF_TOKEN environment variable, or update your Streamlit deployment secrets."
         )
         return None
 
@@ -171,40 +170,43 @@ def get_active_chat() -> dict | None:
     return st.session_state.chats.get(active_chat_id)
 
 
-def build_prompt(messages: list[dict[str, str]]) -> str:
-    """Convert the full chat history into a single prompt for the model."""
+def build_system_prompt() -> str:
+    """Create the system prompt, including saved user memory when available."""
     memory = st.session_state.memory
-    conversation_lines = [
+    prompt_lines = [
         "You are a helpful AI chat assistant. Respond clearly and briefly.",
         "Use the conversation history to maintain context.",
     ]
 
     if memory:
-        conversation_lines.extend(
+        prompt_lines.extend(
             [
                 "Personalize your responses using this saved user memory when relevant:",
                 json.dumps(memory, ensure_ascii=True),
             ]
         )
 
-    conversation_lines.extend(["", "Conversation:"])
+    return "\n".join(prompt_lines)
 
+def build_api_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Convert session chat messages into router chat-completions messages."""
+    api_messages = [{"role": "system", "content": build_system_prompt()}]
     for message in messages:
-        role = "User" if message["role"] == "user" else "Assistant"
-        conversation_lines.append(f"{role}: {message['content']}")
-
-    conversation_lines.append("Assistant:")
-    return "\n".join(conversation_lines)
+        api_messages.append({"role": message["role"], "content": message["content"]})
+    return api_messages
 
 
 def request_assistant_reply(token: str, messages: list[dict[str, str]]) -> tuple[str | None, str | None]:
     """Send the full conversation to Hugging Face and stream the reply into the UI."""
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
     payload = {
-        "inputs": build_prompt(messages),
+        "model": MODEL_ID,
+        "messages": build_api_messages(messages),
         "stream": True,
-        "options": {"wait_for_model": True},
-        "parameters": {"max_new_tokens": 120, "return_full_text": False},
+        "max_tokens": 120,
     }
 
     try:
@@ -257,19 +259,11 @@ def request_assistant_reply(token: str, messages: list[dict[str, str]]) -> tuple
 
             chunk_text = ""
 
-            token_data = payload.get("token")
-            if isinstance(token_data, dict):
-                if not token_data.get("special"):
-                    chunk_text = token_data.get("text", "")
-
             choices = payload.get("choices")
             if not chunk_text and isinstance(choices, list) and choices:
                 delta = choices[0].get("delta", {})
                 if isinstance(delta, dict):
                     chunk_text = delta.get("content", "")
-
-            if not chunk_text and payload.get("generated_text") and not response_chunks:
-                chunk_text = str(payload["generated_text"])
 
             if chunk_text:
                 response_chunks.append(chunk_text)
@@ -287,17 +281,25 @@ def request_assistant_reply(token: str, messages: list[dict[str, str]]) -> tuple
 
 def extract_memory_from_message(token: str, user_message: str) -> tuple[dict | None, str | None]:
     """Ask the model to extract user traits/preferences as JSON."""
-    headers = {"Authorization": f"Bearer {token}"}
-    extraction_prompt = (
-        "Given this user message, extract any personal facts or preferences as a JSON object. "
-        "Good examples include name, preferred_language, interests, communication_style, "
-        "favorite_topics, likes, dislikes, or goals. If none are present, return {} only.\n\n"
-        f"User message: {user_message}\n\nJSON:"
-    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
     payload = {
-        "inputs": extraction_prompt,
-        "options": {"wait_for_model": True},
-        "parameters": {"max_new_tokens": 120, "return_full_text": False},
+        "model": MODEL_ID,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Extract any personal facts or preferences from the user's message as JSON only. "
+                    "Useful keys can include name, preferred_language, interests, communication_style, "
+                    "favorite_topics, likes, dislikes, or goals. If there is nothing useful, return {}."
+                ),
+            },
+            {"role": "user", "content": user_message},
+        ],
+        "stream": False,
+        "max_tokens": 120,
     }
 
     try:
@@ -316,12 +318,12 @@ def extract_memory_from_message(token: str, user_message: str) -> tuple[dict | N
         return None, None
 
     generated_text = ""
-    if isinstance(data, list) and data:
-        first_item = data[0]
-        if isinstance(first_item, dict):
-            generated_text = str(first_item.get("generated_text", "")).strip()
-    elif isinstance(data, dict):
-        generated_text = str(data.get("generated_text", "")).strip()
+    if isinstance(data, dict):
+        choices = data.get("choices", [])
+        if isinstance(choices, list) and choices:
+            message = choices[0].get("message", {})
+            if isinstance(message, dict):
+                generated_text = str(message.get("content", "")).strip()
 
     if not generated_text:
         return {}, None
