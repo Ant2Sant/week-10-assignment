@@ -1,0 +1,4 @@
+{
+  // Do not auto-activate the project's .venv in new terminals.
+  "python.terminal.activateEnvironment": false
+}
