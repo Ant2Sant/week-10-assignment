@@ -29,3 +29,6 @@
 **Prompt:** Add persistent user memory to the Streamlit chat app. After each assistant response, make a second lightweight API call that extracts personal traits or preferences from the latest user message as JSON, store that data in memory.json, display it in a sidebar expander with a native clear/reset control, and inject the saved memory into future prompts so responses become personalized.
 **AI Suggestion:** The AI added a memory pipeline that loads and saves memory.json, sends a second Hugging Face request to extract user traits from the latest message, merges those traits into persistent memory, displays the saved memory in a sidebar expander, and includes the memory JSON in the system prompt for future responses so the model can personalize its replies.
 **My Modifications & Reflections:** The code worked as a strong memory feature extension and stayed within the assignment by using native Streamlit controls for display and reset. I adapted the prompt-building logic so saved traits affect future responses, kept the memory format simple as a JSON dictionary, and preserved persistence so memory survives app restarts along with the saved chats.
+
+
+App is found through "justchatting.streamlit.app"
